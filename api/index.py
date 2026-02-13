@@ -223,10 +223,10 @@ def _infer_source_from_desc(desc: str, domain: str) -> str:
         return "fred"
 
     # Country-level economic claims → World Bank
-    if _match_country(desc):
+    if _match_country(desc) and not any(k in desc.lower() for k in ("oil","crude","energy","gas","coal","petroleum","urals")):
         return "worldbank"
-    if domain_lower in ("economics","geopolitics"):
-        return "worldbank"
+    if domain_lower == "economics":
+        return "fred"
 
     return "skip"
 
@@ -260,12 +260,17 @@ async def route_query(validation_query: dict) -> dict:
                     data = {"available": False, "error": "Could not match to a FRED series"}
 
         elif source == "worldbank":
-            country = _match_country(desc + " " + claim_text)
-            indicator = _match_wb_indicator(desc + " " + claim_text)
-            if country:
-                data = await query_worldbank(country, indicator)
+            combined = (desc + " " + claim_text).lower()
+            # Don't use World Bank country indicators for energy/oil claims
+            if any(k in combined for k in ("oil","crude","petroleum","urals","energy","gas","coal","commodity","price")):
+                data = await query_commodity_price(_match_commodity(combined))
             else:
-                data = {"available": False, "error": "Could not identify country"}
+                country = _match_country(combined)
+                indicator = _match_wb_indicator(combined)
+                if country:
+                    data = await query_worldbank(country, indicator)
+                else:
+                    data = {"available": False, "error": "Could not identify country"}
 
         elif source == "worldbank_commodity":
             commodity = _match_commodity(desc + " " + claim_text)
