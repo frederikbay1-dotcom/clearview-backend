@@ -132,14 +132,31 @@ async def query_worldbank(country_code: str, indicator_key: str) -> dict:
 
 
 async def query_commodity_price(commodity: str = "oil") -> dict:
-    commodity_map = {
-        "oil":       ("POILWTIUSDM", "Crude Oil (WTI), $/barrel"),
-        "oil_brent": ("POILBREUSDM", "Crude Oil (Brent), $/barrel"),
-        "gas":       ("PNGASUSDM",   "Natural Gas (US), $/mmbtu"),
-        "coal":      ("PCOALAUUSDM", "Coal (Australia), $/mt"),
-        "wheat":     ("PWHEAMTUSDM", "Wheat (US HRW), $/mt"),
+    """Try FRED first (confirmed working), fall back to World Bank."""
+    # FRED series for commodities
+    fred_map = {
+        "oil":       ("DCOILWTICO",   "WTI Crude Oil Price ($/barrel)"),
+        "oil_brent": ("DCOILBRENTEU", "Brent Crude Oil Price ($/barrel)"),
+        "gas":       ("MHHNGSP",      "Natural Gas Price ($/mmbtu)"),
     }
-    indicator_id, label = commodity_map.get(commodity, commodity_map["oil_brent"])
+    # World Bank series for commodities
+    wb_map = {
+        "oil":       ("POILWTIUSDM",  "Crude Oil (WTI), $/barrel"),
+        "oil_brent": ("POILBREUSDM",  "Crude Oil (Brent), $/barrel"),
+        "gas":       ("PNGASUSDM",    "Natural Gas (US), $/mmbtu"),
+        "coal":      ("PCOALAUUSDM",  "Coal (Australia), $/mt"),
+        "wheat":     ("PWHEAMTUSDM",  "Wheat (US HRW), $/mt"),
+    }
+
+    # Try FRED first if we have a key and a matching series
+    if FRED_API_KEY and commodity in fred_map:
+        series_id, label = fred_map[commodity]
+        result = await query_fred(series_id, label)
+        if result.get("available"):
+            return result
+
+    # Fall back to World Bank
+    indicator_id, label = wb_map.get(commodity, wb_map["oil_brent"])
     try:
         async with httpx.AsyncClient(timeout=HTTPX_TIMEOUT) as client:
             r = await client.get(
