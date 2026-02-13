@@ -238,9 +238,17 @@ async def route_query(validation_query: dict) -> dict:
     domain     = validation_query.get("domain", "")
     data       = {"available": False, "error": "No suitable source"}
 
+    combined = (desc + " " + claim_text).lower()
+
+    # Override: energy domain or oil/crude keywords always go to commodity prices first
+    if domain == "energy" or any(k in combined for k in ("oil","crude","petroleum","urals","brent","wti","energy price","gas price","discount")):
+        logger.info(f"Energy override for claim {claim_id} -> worldbank_commodity")
+        data = await query_commodity_price(_match_commodity(combined))
+        return {"claim_id": claim_id, "claim_text": claim_text, "data": data}
+
     # If LLM said 'other', try to infer the right source
     if source == "other" or not source:
-        source = _infer_source_from_desc(desc + " " + claim_text, domain)
+        source = _infer_source_from_desc(combined, domain)
 
     logger.info(f"Routing claim {claim_id} to source: {source} | desc: {desc[:60]}")
 
