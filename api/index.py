@@ -76,8 +76,8 @@ async def query_fred(series_id: str, series_label: str) -> dict:
         async with httpx.AsyncClient(timeout=HTTPX_TIMEOUT) as client:
             r = await client.get("https://api.stlouisfed.org/fred/series/observations", params={
                 "series_id": series_id, "api_key": FRED_API_KEY,
-                "file_type": "json", "sort_order": "desc", "limit": 4,
-                "observation_start": "2020-01-01",
+                "file_type": "json", "sort_order": "desc", "limit": 24,
+                "observation_start": "2022-01-01",
             })
             r.raise_for_status()
             obs = [o for o in r.json().get("observations", []) if o.get("value") != "."]
@@ -487,14 +487,19 @@ RULES:
         try:
             synth = await anthropic_client.messages.create(
                 model="claude-haiku-4-5-20251001", max_tokens=200,
-                messages=[{"role": "user", "content": f"""Validate this news claim using the data provided.
+                messages=[{"role": "user", "content": f"""You are validating a specific news claim using data from an authoritative source.
 
 CLAIM: {vr['claim_text']}
 
-DATA:
+DATA RETRIEVED:
 {_format_data(data)}
 
-Write 2-3 plain English sentences: what does the data show, does it support/partially support/contradict the claim, and any important caveats. Be precise. No jargon. No labels or headers."""}]
+Write exactly 2-3 plain English sentences. No headers, no bullet points, no markdown.
+- First sentence: what the data actually shows
+- Second sentence: whether this data supports, partially supports, or cannot directly validate the claim (and why)
+- Third sentence (if needed): the most important caveat
+
+Important: if the data is a price series (like oil price), explain what the price trend over the period shows and how that relates to the claim. Do not misinterpret rising prices as a widening discount."""}]
             )
             summary_text = synth.content[0].text.strip()
             validation_summaries.append({
