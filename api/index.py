@@ -41,11 +41,14 @@ FRED_SERIES = {
     ("interest rate","federal funds","fed rate"):        ("FEDFUNDS","US Federal Funds Rate (%)"),
     ("trade balance","trade deficit","trade surplus"):   ("BOPGSTB","US Trade Balance ($M)"),
     ("wti","west texas","oil price us"):                 ("DCOILWTICO","WTI Crude Oil Price ($/barrel)"),
-    ("brent","brent crude","global oil"):                ("DCOILBRENTEU","Brent Crude Oil Price ($/barrel)"),
+    ("brent","brent crude","global oil price"):          ("DCOILBRENTEU","Brent Crude Oil Price ($/barrel)"),
     ("dollar","usd","dollar index"):                     ("DTWEXBGS","US Dollar Index (Broad)"),
     ("national debt","government debt","federal debt"):  ("GFDEBTN","US National Debt ($M)"),
     ("exports","export"):                                ("EXPGS","US Exports of Goods & Services ($B)"),
     ("imports","import"):                                ("IMPGS","US Imports of Goods & Services ($B)"),
+    ("oil price","crude price","petroleum price"):       ("DCOILBRENTEU","Brent Crude Oil Price ($/barrel)"),
+    ("urals","russian oil","russian crude"):             ("DCOILBRENTEU","Brent Crude Oil Price ($/barrel, proxy for Urals)"),
+    ("energy price","commodity price"):                  ("DCOILWTICO","WTI Crude Oil Price ($/barrel)"),
 }
 
 # ── World Bank indicators ──
@@ -91,6 +94,7 @@ async def query_fred(series_id: str, series_label: str) -> dict:
                 "url": f"https://fred.stlouisfed.org/series/{series_id}",
             }
     except Exception as e:
+        logger.warning(f"FRED query failed: {e}")
         return {"available": False, "error": str(e)}
 
 
@@ -123,6 +127,7 @@ async def query_worldbank(country_code: str, indicator_key: str) -> dict:
                 "url": f"https://data.worldbank.org/indicator/{indicator_id}?locations={country_code}",
             }
     except Exception as e:
+        logger.warning(f"World Bank query failed: {e}")
         return {"available": False, "error": str(e)}
 
 
@@ -134,12 +139,12 @@ async def query_commodity_price(commodity: str = "oil") -> dict:
         "coal":      ("PCOALAUUSDM", "Coal (Australia), $/mt"),
         "wheat":     ("PWHEAMTUSDM", "Wheat (US HRW), $/mt"),
     }
-    indicator_id, label = commodity_map.get(commodity, commodity_map["oil"])
+    indicator_id, label = commodity_map.get(commodity, commodity_map["oil_brent"])
     try:
         async with httpx.AsyncClient(timeout=HTTPX_TIMEOUT) as client:
             r = await client.get(
                 f"https://api.worldbank.org/v2/country/WLD/indicator/{indicator_id}",
-                params={"format": "json", "per_page": 4, "mrv": 4}
+                params={"format": "json", "per_page": 6, "mrv": 6}
             )
             r.raise_for_status()
             data = r.json()
@@ -151,14 +156,15 @@ async def query_commodity_price(commodity: str = "oil") -> dict:
             latest = records[0]
             return {
                 "available": True,
-                "source": "World Bank Commodity Price Data",
+                "source": "World Bank Commodity Price Data (Pink Sheet)",
                 "commodity": label,
                 "latest_value": latest["value"],
                 "latest_date": latest["date"],
-                "recent_values": [{"date": d["date"], "value": d["value"]} for d in records[:3]],
+                "recent_values": [{"date": d["date"], "value": d["value"]} for d in records[:4]],
                 "url": "https://www.worldbank.org/en/research/commodity-markets",
             }
     except Exception as e:
+        logger.warning(f"Commodity price query failed: {e}")
         return {"available": False, "error": str(e)}
 
 
@@ -184,7 +190,7 @@ def _match_wb_indicator(desc: str) -> str:
     desc_lower = desc.lower()
     if any(k in desc_lower for k in ("gdp growth","growth rate","economic growth")): return "gdp_growth"
     if any(k in desc_lower for k in ("gdp","economy size","output")): return "gdp_current_usd"
-    if any(k in desc_lower for k in ("inflation","price")): return "inflation_cpi"
+    if any(k in desc_lower for k in ("inflation","price index")): return "inflation_cpi"
     if any(k in desc_lower for k in ("unemployment","employment")): return "unemployment"
     if any(k in desc_lower for k in ("export",)): return "exports_pct_gdp"
     if any(k in desc_lower for k in ("import",)): return "imports_pct_gdp"
@@ -195,32 +201,78 @@ def _match_wb_indicator(desc: str) -> str:
 def _match_commodity(desc: str) -> str:
     desc_lower = desc.lower()
     if "brent" in desc_lower: return "oil_brent"
-    if any(k in desc_lower for k in ("oil","crude","petroleum")): return "oil"
-    if any(k in desc_lower for k in ("gas","natural gas")): return "gas"
+    if any(k in desc_lower for k in ("oil","crude","petroleum","urals","russian oil","energy")): return "oil_brent"
+    if any(k in desc_lower for k in ("gas","natural gas","lng")): return "gas"
     if "coal" in desc_lower: return "coal"
     if "wheat" in desc_lower: return "wheat"
-    return "oil"
+    return "oil_brent"
+
+def _infer_source_from_desc(desc: str, domain: str) -> str:
+    """Fallback: infer best source from claim description and domain when LLM says 'other'."""
+    desc_lower = desc.lower()
+    domain_lower = (domain or "").lower()
+
+    # Energy/commodity claims → commodity prices
+    if any(k in desc_lower for k in ("oil","crude","petroleum","urals","brent","wti","gas","coal","energy","commodity","price discount")):
+        return "worldbank_commodity"
+    if domain_lower == "energy":
+        return "worldbank_commodity"
+
+    # US economic claims → FRED
+    if any(k in desc_lower for k in ("us ","united states","american","federal","dollar","gdp","inflation","unemployment","interest rate","trade balance")):
+        return "fred"
+
+    # Country-level economic claims → World Bank
+    if _match_country(desc):
+        return "worldbank"
+    if domain_lower in ("economics","geopolitics"):
+        return "worldbank"
+
+    return "skip"
 
 async def route_query(validation_query: dict) -> dict:
-    source   = validation_query.get("suggested_source", "other")
-    desc     = validation_query.get("suggested_parameters", {}).get("description", "")
-    claim_id = validation_query.get("claim_id", "")
+    source     = validation_query.get("suggested_source", "other")
+    desc       = validation_query.get("suggested_parameters", {}).get("description", "")
+    claim_id   = validation_query.get("claim_id", "")
     claim_text = validation_query.get("claim_text", "")
-    data     = {"available": False, "error": "No suitable source"}
+    domain     = validation_query.get("domain", "")
+    data       = {"available": False, "error": "No suitable source"}
+
+    # If LLM said 'other', try to infer the right source
+    if source == "other" or not source:
+        source = _infer_source_from_desc(desc + " " + claim_text, domain)
+
+    logger.info(f"Routing claim {claim_id} to source: {source} | desc: {desc[:60]}")
+
+    if source == "skip":
+        return {"claim_id": claim_id, "claim_text": claim_text, "data": {"available": False, "error": "No suitable source"}}
 
     try:
         if source == "fred":
-            match = _match_fred(desc)
+            match = _match_fred(desc + " " + claim_text)
             if match:
                 data = await query_fred(match[0], match[1])
+            else:
+                # Fallback: try commodity if FRED match fails and it's energy-related
+                if any(k in (desc + claim_text).lower() for k in ("oil","crude","energy")):
+                    data = await query_commodity_price("oil_brent")
+                else:
+                    data = {"available": False, "error": "Could not match to a FRED series"}
+
         elif source == "worldbank":
-            country = _match_country(desc)
-            indicator = _match_wb_indicator(desc)
+            country = _match_country(desc + " " + claim_text)
+            indicator = _match_wb_indicator(desc + " " + claim_text)
             if country:
                 data = await query_worldbank(country, indicator)
+            else:
+                data = {"available": False, "error": "Could not identify country"}
+
         elif source == "worldbank_commodity":
-            data = await query_commodity_price(_match_commodity(desc))
+            commodity = _match_commodity(desc + " " + claim_text)
+            data = await query_commodity_price(commodity)
+
     except Exception as e:
+        logger.error(f"Route query error for {claim_id}: {e}")
         data = {"available": False, "error": str(e)}
 
     return {"claim_id": claim_id, "claim_text": claim_text, "data": data}
@@ -282,11 +334,16 @@ class AnalyseRequest(BaseModel):
 
 @app.get("/api/health")
 async def health():
-    return {"status":"ok","version":"1.0.0","llm_ready":bool(ANTHROPIC_API_KEY),"fred_key":bool(FRED_API_KEY),"message":"ClearView API is running" if ANTHROPIC_API_KEY else "WARNING: API key missing"}
+    return {
+        "status": "ok", "version": "1.0.0",
+        "llm_ready": bool(ANTHROPIC_API_KEY),
+        "fred_key": bool(FRED_API_KEY),
+        "message": "ClearView API is running" if ANTHROPIC_API_KEY else "WARNING: API key missing"
+    }
 
 @app.get("/")
 async def root():
-    return {"message":"ClearView API","version":"1.0.0","health":"/api/health","docs":"/docs"}
+    return {"message": "ClearView API", "version": "1.0.0", "health": "/api/health", "docs": "/docs"}
 
 @app.post("/api/analyse")
 async def analyse(request: AnalyseRequest):
@@ -307,20 +364,62 @@ TEXT: {request.article_text[:10000]}
 Return this exact JSON schema:
 {{
   "thesis": "Central conclusion in one sentence",
-  "claims": [{{"id":"C1","text":"claim text","type":"explicit_fact|implicit_assumption|normative|hedged","is_checkable":true,"domain":"economics|geopolitics|energy|other"}}],
-  "argument_map": {{"conclusion":"thesis restatement","nodes":[{{"id":"C1","label":"short label","type":"premise|conclusion|assumption"}}],"edges":[{{"from":"C1","to":"C2","relation":"supports|contradicts|assumes"}}]}},
-  "implicit_assumptions": [{{"id":"A1","text":"assumption","underlies_claim":"C1","explanation":"why this matters"}}],
-  "logical_flags": [{{"type":"inferential_gap|correlation_causation|other","description":"plain english description","location":"which claim"}}],
-  "validation_queries": [{{"claim_id":"C1","claim_text":"claim text","query_description":"what to look up","suggested_source":"fred|worldbank|worldbank_commodity|other","suggested_parameters":{{"description":"natural language description of data needed"}}}}],
-  "summary": {{"total_claims":0,"explicit_facts":0,"implicit_assumptions":0,"normative_claims":0,"hedged_claims":0,"checkable_claims":0,"logical_flags_count":0}}
+  "claims": [
+    {{
+      "id": "C1",
+      "text": "claim text",
+      "type": "explicit_fact|implicit_assumption|normative|hedged",
+      "is_checkable": true,
+      "domain": "economics|geopolitics|energy|other"
+    }}
+  ],
+  "argument_map": {{
+    "conclusion": "thesis restatement",
+    "nodes": [{{"id":"C1","label":"short label","type":"premise|conclusion|assumption"}}],
+    "edges": [{{"from":"C1","to":"C2","relation":"supports|contradicts|assumes"}}]
+  }},
+  "implicit_assumptions": [
+    {{"id":"A1","text":"assumption","underlies_claim":"C1","explanation":"why this matters"}}
+  ],
+  "logical_flags": [
+    {{"type":"inferential_gap|correlation_causation|other","description":"plain english description","location":"which claim"}}
+  ],
+  "validation_queries": [
+    {{
+      "claim_id": "C1",
+      "claim_text": "exact claim text",
+      "domain": "economics|geopolitics|energy|other",
+      "query_description": "what data would validate this",
+      "suggested_source": "fred|worldbank|worldbank_commodity",
+      "suggested_parameters": {{
+        "description": "specific data needed — name the country, indicator, or commodity explicitly"
+      }}
+    }}
+  ],
+  "summary": {{
+    "total_claims": 0,
+    "explicit_facts": 0,
+    "implicit_assumptions": 0,
+    "normative_claims": 0,
+    "hedged_claims": 0,
+    "checkable_claims": 0,
+    "logical_flags_count": 0
+  }}
 }}
 
-Rules: Extract 5-12 claims. Identify 2-5 implicit assumptions. Only generate validation_queries for is_checkable claims. Be politically neutral."""
+RULES:
+- Extract 5-12 claims. Identify 2-5 implicit assumptions. Be politically neutral.
+- Only generate validation_queries for claims where is_checkable is true.
+- For oil price, crude oil, energy commodity claims: ALWAYS use suggested_source = "worldbank_commodity"
+- For US economic data (GDP, unemployment, inflation, interest rates, trade): ALWAYS use suggested_source = "fred"
+- For country-level economic data (GDP, trade, military spending for any specific country): ALWAYS use suggested_source = "worldbank"
+- In suggested_parameters.description: be specific — name the exact country, commodity, or indicator needed.
+- Never use suggested_source = "other" if worldbank_commodity, fred, or worldbank could apply."""
 
     try:
         msg = await anthropic_client.messages.create(
             model="claude-sonnet-4-5-20250929", max_tokens=4096,
-            system="You are ClearView's analysis engine. Expert in critical thinking and argument analysis. Always respond with valid JSON only.",
+            system="You are ClearView's analysis engine. Expert in critical thinking and argument analysis. Always respond with valid JSON only. Never use markdown code fences.",
             messages=[{"role": "user", "content": prompt}]
         )
         raw = msg.content[0].text.strip()
@@ -335,7 +434,9 @@ Rules: Extract 5-12 claims. Identify 2-5 implicit assumptions. Only generate val
 
     # ── Step 2: Parallel Data Validation ──
     validation_queries = analysis.get("validation_queries", [])
-    tasks = [route_query(q) for q in validation_queries if q.get("suggested_source") not in ("other", None)]
+    logger.info(f"Running {len(validation_queries)} validation queries")
+
+    tasks = [route_query(q) for q in validation_queries]
     raw_results = []
     if tasks:
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -347,7 +448,8 @@ Rules: Extract 5-12 claims. Identify 2-5 implicit assumptions. Only generate val
         data = vr.get("data", {})
         if not data.get("available"):
             validation_summaries.append({
-                "claim_id": vr["claim_id"], "status": "insufficient_data",
+                "claim_id": vr["claim_id"],
+                "status": "insufficient_data",
                 "summary": "No suitable data found in available sources.",
                 "source_name": "", "source_url": "",
             })
@@ -355,14 +457,14 @@ Rules: Extract 5-12 claims. Identify 2-5 implicit assumptions. Only generate val
         try:
             synth = await anthropic_client.messages.create(
                 model="claude-haiku-4-5-20251001", max_tokens=200,
-                messages=[{"role": "user", "content": f"""You are synthesising data to validate a news claim.
+                messages=[{"role": "user", "content": f"""Validate this news claim using the data provided.
 
 CLAIM: {vr['claim_text']}
 
 DATA:
 {_format_data(data)}
 
-Write 2-3 plain English sentences: what does the data show, does it support/partially support/contradict the claim, and any caveats. No jargon. No labels. Just the summary."""}]
+Write 2-3 plain English sentences: what does the data show, does it support/partially support/contradict the claim, and any important caveats. Be precise. No jargon. No labels or headers."""}]
             )
             summary_text = synth.content[0].text.strip()
             validation_summaries.append({
@@ -372,16 +474,20 @@ Write 2-3 plain English sentences: what does the data show, does it support/part
                 "source_name": data.get("source", ""),
                 "source_url":  data.get("url", ""),
                 "source_date": data.get("latest_date") or data.get("latest_year") or "",
-                "raw_data": {k: v for k, v in data.items() if k in ["latest_value","latest_date","latest_year","indicator","country","commodity","series_label","recent_values"]},
+                "raw_data": {k: v for k, v in data.items() if k in [
+                    "latest_value","latest_date","latest_year",
+                    "indicator","country","commodity","series_label","recent_values"
+                ]},
             })
         except Exception as e:
+            logger.warning(f"Synthesis failed for {vr['claim_id']}: {e}")
             validation_summaries.append({
                 "claim_id": vr["claim_id"], "status": "insufficient_data",
                 "summary": "Data retrieved but synthesis failed.",
                 "source_name": data.get("source",""), "source_url": data.get("url",""),
             })
 
-    # Mark remaining checkable claims with no data
+    # Mark remaining checkable claims as insufficient
     validated_ids = {v["claim_id"] for v in validation_summaries}
     for q in validation_queries:
         if q["claim_id"] not in validated_ids:
