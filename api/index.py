@@ -448,7 +448,7 @@ RULES:
 
     try:
         msg = await anthropic_client.messages.create(
-            model="claude-sonnet-4-5-20250929", max_tokens=2048,
+            model="claude-sonnet-4-5-20250929", max_tokens=4096,
             system="You are ClearView's analysis engine. Expert in critical thinking and argument analysis. Always respond with valid JSON only. Never use markdown code fences.",
             messages=[{"role": "user", "content": prompt}]
         )
