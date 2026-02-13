@@ -448,7 +448,7 @@ RULES:
 
     try:
         msg = await anthropic_client.messages.create(
-            model="claude-sonnet-4-5-20250929", max_tokens=4096,
+            model="claude-sonnet-4-5-20250929", max_tokens=2048,
             system="You are ClearView's analysis engine. Expert in critical thinking and argument analysis. Always respond with valid JSON only. Never use markdown code fences.",
             messages=[{"role": "user", "content": prompt}]
         )
@@ -472,18 +472,16 @@ RULES:
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
         raw_results = [r for r in raw_results if isinstance(r, dict)]
 
-    # ── Step 3: Synthesise with LLM ──
-    validation_summaries = []
-    for vr in raw_results:
+    # ── Step 3: Synthesise with LLM (parallel) ──
+    async def synthesise_one(vr: dict) -> dict:
         data = vr.get("data", {})
         if not data.get("available"):
-            validation_summaries.append({
+            return {
                 "claim_id": vr["claim_id"],
                 "status": "insufficient_data",
                 "summary": "No suitable data found in available sources.",
                 "source_name": "", "source_url": "",
-            })
-            continue
+            }
         try:
             synth = await anthropic_client.messages.create(
                 model="claude-haiku-4-5-20251001", max_tokens=200,
@@ -502,7 +500,7 @@ Write exactly 2-3 plain English sentences. No headers, no bullet points, no mark
 Important: if the data is a price series (like oil price), explain what the price trend over the period shows and how that relates to the claim. Do not misinterpret rising prices as a widening discount."""}]
             )
             summary_text = synth.content[0].text.strip()
-            validation_summaries.append({
+            return {
                 "claim_id":    vr["claim_id"],
                 "status":      _infer_status(summary_text),
                 "summary":     summary_text,
@@ -513,14 +511,17 @@ Important: if the data is a price series (like oil price), explain what the pric
                     "latest_value","latest_date","latest_year",
                     "indicator","country","commodity","series_label","recent_values"
                 ]},
-            })
+            }
         except Exception as e:
             logger.warning(f"Synthesis failed for {vr['claim_id']}: {e}")
-            validation_summaries.append({
+            return {
                 "claim_id": vr["claim_id"], "status": "insufficient_data",
                 "summary": "Data retrieved but synthesis failed.",
                 "source_name": data.get("source",""), "source_url": data.get("url",""),
-            })
+            }
+
+    synth_results = await asyncio.gather(*[synthesise_one(vr) for vr in raw_results], return_exceptions=True)
+    validation_summaries = [r for r in synth_results if isinstance(r, dict)]
 
     # Mark remaining checkable claims as insufficient
     validated_ids = {v["claim_id"] for v in validation_summaries}
