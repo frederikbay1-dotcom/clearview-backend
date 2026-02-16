@@ -549,6 +549,107 @@ def _infer_status(text: str) -> str:
     return "insufficient_data"
 
 
+
+
+# ── Trusted source lists by tier ──
+TIER1_DOMAINS = [
+    "fred.stlouisfed.org","worldbank.org","data.worldbank.org",
+    "ec.europa.eu/eurostat","eia.gov","iea.org",
+    "federalreserve.gov","ecb.europa.eu","bis.org",
+    "imf.org","oecd.org","un.org","wto.org","opec.org",
+]
+
+TIER2_DOMAINS = [
+    "imf.org","iea.org","wto.org","un.org","trade.gov",
+    "ustr.gov","treasury.gov","bis.org","ecb.europa.eu",
+    "bea.gov","bls.gov","census.gov","europarl.europa.eu",
+    "consilium.europa.eu","energy.gov","state.gov",
+]
+
+TIER3_DOMAINS = [
+    "reuters.com","ft.com","apnews.com","economist.com",
+    "bbc.com","bloomberg.com","wsj.com","nytimes.com",
+    "theguardian.com","foreignaffairs.com","cfr.org",
+    "brookings.edu","chathamhouse.org","piie.com",
+]
+
+async def query_web_search(claim_text: str, tier: int, anthropic_client_ref) -> dict:
+    """Use Claude's web search tool restricted to trusted domains by tier."""
+    if tier == 2:
+        domains = TIER2_DOMAINS
+        source_type = "Primary Source"
+        tier_label = "primary_source"
+    else:
+        domains = TIER3_DOMAINS
+        source_type = "News/Analysis"
+        tier_label = "news_report"
+
+    domain_list = ", ".join(domains[:8])  # Top 8 domains for the search
+
+    try:
+        search_prompt = f"""Search for evidence to validate or refute this specific claim from a news article:
+
+CLAIM: {claim_text}
+
+Search only trusted sources. Look for:
+1. Official statistics or reports that directly address this claim
+2. Recent data (2022-2026) that confirms or contradicts the specific figures or facts stated
+3. The most authoritative source available
+
+Provide a 2-3 sentence assessment: what did you find, does it support or contradict the claim, and cite the specific source."""
+
+        msg = await anthropic_client_ref.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            tools=[{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "allowed_domains": domains
+            }],
+            messages=[{"role": "user", "content": search_prompt}]
+        )
+
+        # Extract text and source from response
+        text_content = ""
+        source_url = ""
+        source_name = ""
+
+        for block in msg.content:
+            if hasattr(block, "type"):
+                if block.type == "text":
+                    text_content = block.text.strip()
+                elif block.type == "tool_result":
+                    # Extract URL from search results
+                    if hasattr(block, "content"):
+                        for item in block.content:
+                            if hasattr(item, "url"):
+                                source_url = item.url
+                                # Extract domain as source name
+                                from urllib.parse import urlparse
+                                source_name = urlparse(source_url).netloc.replace("www.", "")
+                                break
+
+        if not text_content:
+            return {"available": False, "error": "No search results"}
+
+        return {
+            "available": True,
+            "source": source_name or source_type,
+            "source_tier": tier_label,
+            "series_label": f"Web search — {source_type}",
+            "summary": text_content,
+            "latest_value": None,
+            "latest_date": None,
+            "recent_values": [],
+            "url": source_url,
+            "web_search": True,
+        }
+
+    except Exception as e:
+        logger.warning(f"Web search failed (tier {tier}): {e}")
+        return {"available": False, "error": str(e)}
+
+
 # ════════════════════════════════════════
 #  FASTAPI APP
 # ════════════════════════════════════════
@@ -690,12 +791,34 @@ RULES:
     # ── Step 3: Synthesise with LLM (parallel) ──
     async def synthesise_one(vr: dict) -> dict:
         data = vr.get("data", {})
+
+        # If structured API failed, try tiered web search
         if not data.get("available"):
+            logger.info(f"Structured API failed for {vr['claim_id']}, trying web search tier 2")
+            data = await query_web_search(vr["claim_text"], tier=2, anthropic_client_ref=anthropic_client)
+            if not data.get("available"):
+                logger.info(f"Tier 2 failed for {vr['claim_id']}, trying tier 3")
+                data = await query_web_search(vr["claim_text"], tier=3, anthropic_client_ref=anthropic_client)
+            if not data.get("available"):
+                return {
+                    "claim_id": vr["claim_id"],
+                    "status": "insufficient_data",
+                    "summary": "No suitable data found in available sources.",
+                    "source_name": "", "source_url": "",
+                }
+
+        # If this was a web search result, it already has a summary — use it directly
+        if data.get("web_search") and data.get("summary"):
+            summary_text = data["summary"]
             return {
-                "claim_id": vr["claim_id"],
-                "status": "insufficient_data",
-                "summary": "No suitable data found in available sources.",
-                "source_name": "", "source_url": "",
+                "claim_id":    vr["claim_id"],
+                "status":      _infer_status(summary_text),
+                "summary":     summary_text,
+                "source_name": data.get("source", ""),
+                "source_url":  data.get("url", ""),
+                "source_date": "",
+                "source_tier": data.get("source_tier", "news_report"),
+                "raw_data":    {},
             }
         try:
             synth = await anthropic_client.messages.create(
@@ -730,6 +853,7 @@ Rules:
                 "source_name": data.get("source", ""),
                 "source_url":  data.get("url", ""),
                 "source_date": data.get("latest_date") or data.get("latest_year") or "",
+                "source_tier": "primary_data",
                 "raw_data": {k: v for k, v in data.items() if k in [
                     "latest_value","latest_date","latest_year",
                     "indicator","country","commodity","series_label","recent_values"
