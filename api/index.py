@@ -363,10 +363,18 @@ def _infer_source_from_desc(desc: str, domain: str) -> str:
     desc_lower = desc.lower()
     domain_lower = (domain or "").lower()
 
-    # EU/European energy stats → Eurostat
-    if any(k in desc_lower for k in ("european","eu ","eurozone","germany","german","france","french","italy","spain","dutch","netherlands")):
-        if any(k in desc_lower for k in ("gas","electricity","energy","manufacturing","industrial","lng")):
+    # EU/European energy stats → Eurostat (check claim text too)
+    eu_keywords = ("european union","eu member","eu gas","eu supply","eu import","eu energy","eu depend",
+                   "germany","german","france","french","italy","spain","norway","dutch","netherlands",
+                   "europe slashes","europe cut","european commission","eu spent","eu subsid")
+    energy_keywords = ("gas","electricity","energy","manufacturing","industrial","lng","supply","depend",
+                       "import","subsid","price","cost","billion","trillion")
+    if any(k in desc_lower for k in eu_keywords) or any(k in desc_lower for k in ("eu ","europe ")):
+        if any(k in desc_lower for k in energy_keywords):
             return "eurostat"
+    # Also check if domain is energy and claim mentions Europe
+    if domain_lower == "energy" and any(k in desc_lower for k in ("europe","eu","german","norway","russia")):
+        return "eurostat"
 
     # US LNG exports or bilateral energy trade → EIA
     if any(k in desc_lower for k in ("lng export","us lng","american lng","us gas export","us energy export")):
@@ -402,7 +410,12 @@ async def route_query(validation_query: dict) -> dict:
 
     # Override: energy domain or oil/crude keywords → commodity prices
     # BUT skip if it's a European/EU claim — those go to Eurostat
-    is_european = any(k in combined for k in ("european","eu gas","eu import","eurozone","germany","german","france","french","italy","spain","norway","dutch","netherlands","lng import to europe","europe lng"))
+    is_european = any(k in combined for k in (
+        "european","eu gas","eu import","eu supply","eu depend","eu member","eu spent","eu subsid",
+        "eurozone","germany","german","france","french","italy","spain","norway","dutch","netherlands",
+        "lng import to europe","europe lng","europe slash","europe cut","european commission",
+        "eu electricity","eu energy","eu natural gas"
+    ))
     is_energy = domain == "energy" or any(k in combined for k in ("oil","crude","petroleum","urals","brent","wti","energy price","gas price","discount"))
     if is_energy and not is_european:
         logger.info(f"Energy override for claim {claim_id} -> worldbank_commodity")
