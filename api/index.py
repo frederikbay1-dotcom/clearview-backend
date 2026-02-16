@@ -49,6 +49,7 @@ FRED_SERIES = {
     ("oil price","crude price","petroleum price"):       ("DCOILBRENTEU","Brent Crude Oil Price ($/barrel)"),
     ("urals","russian oil","russian crude"):             ("DCOILBRENTEU","Brent Crude Oil Price ($/barrel, proxy for Urals)"),
     ("energy price","commodity price"):                  ("DCOILWTICO","WTI Crude Oil Price ($/barrel)"),
+    ("sanctions","russian export","oil revenue"):        ("DCOILBRENTEU","Brent Crude Oil Price ($/barrel)"),
 }
 
 # ── World Bank indicators ──
@@ -62,6 +63,9 @@ WB_INDICATORS = {
     "military_expend":  ("MS.MIL.XPND.GD.ZS","Military Expenditure (% of GDP)"),
     "debt_pct_gdp":     ("GC.DOD.TOTL.GD.ZS","Government Debt (% of GDP)"),
     "population":       ("SP.POP.TOTL","Total Population"),
+    "energy_imports":   ("EG.IMP.CONS.ZS","Energy Imports (% of energy use)"),
+    "oil_rents":        ("NY.GDP.PETR.RT.ZS","Oil Rents (% of GDP)"),
+    "trade_pct_gdp":    ("NE.TRD.GNFS.ZS","Trade (% of GDP)"),
 }
 
 
@@ -77,7 +81,7 @@ async def query_fred(series_id: str, series_label: str) -> dict:
             r = await client.get("https://api.stlouisfed.org/fred/series/observations", params={
                 "series_id": series_id, "api_key": FRED_API_KEY,
                 "file_type": "json", "sort_order": "desc", "limit": 24,
-                "observation_start": "2022-01-01",
+                "observation_start": "2021-01-01",
             })
             r.raise_for_status()
             obs = [o for o in r.json().get("observations", []) if o.get("value") != "."]
@@ -210,7 +214,10 @@ def _match_wb_indicator(desc: str) -> str:
     if any(k in desc_lower for k in ("inflation","price index")): return "inflation_cpi"
     if any(k in desc_lower for k in ("unemployment","employment")): return "unemployment"
     if any(k in desc_lower for k in ("export",)): return "exports_pct_gdp"
+    if any(k in desc_lower for k in ("energy import","oil import","crude import")): return "energy_imports"
     if any(k in desc_lower for k in ("import",)): return "imports_pct_gdp"
+    if any(k in desc_lower for k in ("oil rent","oil revenue","petro")): return "oil_rents"
+    if any(k in desc_lower for k in ("trade",)): return "trade_pct_gdp"
     if any(k in desc_lower for k in ("military","defence","defense")): return "military_expend"
     if any(k in desc_lower for k in ("debt","deficit")): return "debt_pct_gdp"
     return "gdp_growth"
@@ -440,11 +447,14 @@ Return this exact JSON schema:
 RULES:
 - Extract 5-12 claims. Identify 2-5 implicit assumptions. Be politically neutral.
 - Only generate validation_queries for claims where is_checkable is true.
-- For oil price, crude oil, energy commodity claims: ALWAYS use suggested_source = "worldbank_commodity"
-- For US economic data (GDP, unemployment, inflation, interest rates, trade): ALWAYS use suggested_source = "fred"
-- For country-level economic data (GDP, trade, military spending for any specific country): ALWAYS use suggested_source = "worldbank"
+- For oil price, crude oil, energy commodity, Urals, Brent, WTI claims: ALWAYS use suggested_source = "worldbank_commodity"
+- For US economic data (GDP, unemployment, inflation, interest rates, trade, Fed): ALWAYS use suggested_source = "fred"
+- For country-level economic data (GDP, trade, energy imports, oil rents for any specific country): ALWAYS use suggested_source = "worldbank"
+- For claims about a country importing energy (e.g. India importing Russian oil): use suggested_source = "worldbank" with description = "energy imports percentage for [country]"
+- For claims about specific statistics (percentages, dollar amounts, growth rates): ALWAYS generate a validation_query even if the source is indirect
 - In suggested_parameters.description: be specific — name the exact country, commodity, or indicator needed.
-- Never use suggested_source = "other" if worldbank_commodity, fred, or worldbank could apply."""
+- Never use suggested_source = "other" — always pick the closest available source.
+- Generate validation_queries for AT LEAST 3 claims per article if possible."""
 
     try:
         msg = await anthropic_client.messages.create(
@@ -485,19 +495,25 @@ RULES:
         try:
             synth = await anthropic_client.messages.create(
                 model="claude-haiku-4-5-20251001", max_tokens=200,
-                messages=[{"role": "user", "content": f"""You are validating a specific news claim using data from an authoritative source.
+                messages=[{"role": "user", "content": f"""You are a fact-checker validating a specific news claim against authoritative data.
 
 CLAIM: {vr['claim_text']}
 
-DATA RETRIEVED:
+DATA:
 {_format_data(data)}
 
-Write exactly 2-3 plain English sentences. No headers, no bullet points, no markdown.
-- First sentence: what the data actually shows
-- Second sentence: whether this data supports, partially supports, or cannot directly validate the claim (and why)
-- Third sentence (if needed): the most important caveat
+Write 2-3 sharp, direct sentences. No headers, no markdown.
 
-Important: if the data is a price series (like oil price), explain what the price trend over the period shows and how that relates to the claim. Do not misinterpret rising prices as a widening discount."""}]
+Lead with a verdict: does the data support, partially support, or contradict the claim?
+Then give the specific numbers that justify your verdict.
+Then note the single most important limitation or caveat.
+
+Rules:
+- Be direct and specific — name exact figures, dates, percentages
+- If data is a price series, compare the trend across the full date range shown, not just recent days
+- If the claim mentions a specific number, compare it directly to the data
+- Never say the data "cannot validate" if it clearly supports or contradicts — commit to a verdict
+- Keep total length under 60 words"""}]
             )
             summary_text = synth.content[0].text.strip()
             return {
