@@ -439,8 +439,13 @@ async def route_query(validation_query: dict) -> dict:
         "lng import to europe","europe lng","europe slash","europe cut","european commission",
         "eu electricity","eu energy","eu natural gas"
     ))
-    is_energy = domain == "energy" or any(k in combined for k in ("oil","crude","petroleum","urals","brent","wti","energy price","gas price","discount"))
-    if is_energy and not is_european:
+    # Skip energy override for volume/quantity claims — price data can't validate those
+    is_volume_claim = any(k in combined for k in (
+        "tripled","doubled","increased by","percent of supply","percent of import",
+        "share of","bcf","billion cubic","million barrel","volume","quantity","amount imported"
+    ))
+    is_energy = domain == "energy" or any(k in combined for k in ("oil price","crude price","petroleum price","urals price","brent price","wti price","energy price","gas price","discount"))
+    if is_energy and not is_european and not is_volume_claim:
         logger.info(f"Energy override for claim {claim_id} -> worldbank_commodity")
         data = await query_commodity_price(_match_commodity(combined))
         return {"claim_id": claim_id, "claim_text": claim_text, "data": data}
@@ -624,10 +629,12 @@ Instructions:
             if block.type == "text":
                 raw = block.text.strip()
                 # Strip any leading markdown artifacts
-                raw = raw.lstrip(",-. ")
-                # Remove markdown bold/asterisks
                 import re
-                raw = re.sub(r"\*\*.*?\*\*:?\s*", "", raw)
+                raw = raw.lstrip(",-. ")
+                # Remove only inline markdown bold labels like **Assessment:** or **Contradicts.**
+                # but preserve the rest of the sentence
+                raw = re.sub(r"\*\*([^*]+)\*\*:?\s*", r"\1 ", raw)
+                raw = re.sub(r"\*([^*]+)\*", r"\1", raw)
                 raw = re.sub(r"\*", "", raw)
                 text_content = raw.strip()
             elif block.type == "tool_use" and block.name == "web_search":
