@@ -136,6 +136,53 @@ async def query_eurostat(dataset: str, params: dict, label: str) -> dict:
             }
     except Exception as e:
         logger.warning(f"Eurostat query failed for {dataset}: {e}")
+async def query_comtrade(reporter_code: str, partner_code: str, commodity_code: str, label: str) -> dict:
+    """UN Comtrade — bilateral trade data. Free API, no key needed.
+    
+    reporter_code: ISO numeric (e.g. 356=India, 840=USA)
+    partner_code: ISO numeric (e.g. 643=Russia, 156=China)
+    commodity_code: HS code (e.g. 2709=crude oil, 2711=LNG)
+    """
+    try:
+        async with httpx.AsyncClient(timeout=HTTPX_TIMEOUT) as client:
+            # Comtrade v1 public API endpoint
+            r = await client.get(
+                "https://comtradeapi.un.org/public/v1/preview/C/A/HS",
+                params={
+                    "reporterCode": reporter_code,
+                    "partnerCode": partner_code,
+                    "cmdCode": commodity_code,
+                    "flowCode": "M",  # M = imports
+                    "period": "2022,2023,2024",
+                    "motCode": "0",  # All modes of transport
+                },
+                headers={"Accept": "application/json"}
+            )
+            r.raise_for_status()
+            data = r.json()
+            records = data.get("data", [])
+            if not records:
+                return {"available": False, "error": "No Comtrade data"}
+            
+            # Sort by period descending
+            records.sort(key=lambda x: x.get("period", ""), reverse=True)
+            latest = records[0]
+            
+            return {
+                "available": True,
+                "source": "UN Comtrade — International Trade Statistics",
+                "series_label": label,
+                "latest_value": latest.get("primaryValue"),  # Trade value in USD
+                "latest_date": latest.get("period"),
+                "recent_values": [
+                    {"year": r.get("period"), "value": r.get("primaryValue")}
+                    for r in records[:4]
+                ],
+                "url": f"https://comtradeplus.un.org/",
+                "source_tier": "primary_data",
+            }
+    except Exception as e:
+        logger.warning(f"Comtrade query failed: {e}")
         return {"available": False, "error": str(e)}
 
 
@@ -264,6 +311,14 @@ async def execute_validation_query(vq: dict, client_ref) -> dict:
             base_filter.update(extra)
             if dataset:
                 data = await query_eurostat(dataset, base_filter, label)
+
+        elif method == "comtrade":
+            reporter = params.get("reporter_code", "")
+            partner  = params.get("partner_code", "")
+            commodity = params.get("commodity_code", "")
+            label    = params.get("label", "Bilateral trade")
+            if reporter and partner and commodity:
+                data = await query_comtrade(reporter, partner, commodity, label)
 
         elif method == "web_search_primary":
             data = await query_web_search(claim_text, TIER2_DOMAINS, "primary_source", client_ref)
@@ -394,6 +449,12 @@ method = "eurostat": For EU/European statistical data. params must include:
   "dataset": Eurostat dataset code (e.g. "nrg_t_gasgov","sts_inpr_m","nrg_pc_205","nrg_ind_id")
   "geo": country/region code (e.g. "EU","DE","FR")
   "label": human readable name
+
+method = "comtrade": For bilateral trade data (country A importing from country B). params must include:
+  "reporter_code": ISO numeric country code (e.g. "356" for India, "840" for USA)
+  "partner_code": ISO numeric country code (e.g. "643" for Russia, "156" for China)
+  "commodity_code": HS commodity code (e.g. "2709" for crude oil, "2711" for natural gas, "27" for all energy)
+  "label": human readable description
 
 method = "web_search_primary": For any claim needing official reports, bilateral trade data, policy documents, sanctions data, or specific statistics not in the above. Use this for geopolitical claims, bilateral trade, energy dependency percentages, spending figures.
 
