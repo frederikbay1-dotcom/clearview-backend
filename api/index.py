@@ -304,6 +304,7 @@ class AnalyseRequest(BaseModel):
     article_text: str = Field(..., min_length=200, max_length=15000)
     headline: str = Field("", max_length=300)
     source: str = Field("", max_length=200)
+    force_refresh: bool = Field(False)
     @validator("article_text")
     def strip_text(cls, v): return v.strip()
 
@@ -326,7 +327,7 @@ async def analyse(request: AnalyseRequest):
         raise HTTPException(status_code=503, detail="Anthropic API key not configured")
 
     cache_key = hashlib.sha256(request.article_text.strip().encode()).hexdigest()[:16]
-    if cache_key in _cache:
+    if cache_key in _cache and not request.force_refresh:
         r = _cache[cache_key].copy(); r["from_cache"] = True; return JSONResponse(r)
 
     # ── Step 1: LLM Analysis + Routing Instructions ──
