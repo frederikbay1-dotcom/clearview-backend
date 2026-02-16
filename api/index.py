@@ -587,16 +587,19 @@ async def query_web_search(claim_text: str, tier: int, anthropic_client_ref) -> 
     domain_list = ", ".join(domains[:8])  # Top 8 domains for the search
 
     try:
-        search_prompt = f"""Search for evidence to validate or refute this specific claim from a news article:
+        search_prompt = f"""Search for evidence about this specific claim from a news article.
 
 CLAIM: {claim_text}
 
-Search only trusted sources. Look for:
-1. Official statistics or reports that directly address this claim
-2. Recent data (2022-2026) that confirms or contradicts the specific figures or facts stated
-3. The most authoritative source available
-
-Provide a 2-3 sentence assessment: what did you find, does it support or contradict the claim, and cite the specific source."""
+Instructions:
+- Search for authoritative data or reports that directly address this claim
+- Focus on specific figures, statistics, or facts from 2021-2026
+- Write your response as 2-3 complete sentences with no markdown formatting whatsoever
+- No asterisks, no bold, no bullet points, no headers, no labels like "Assessment:"
+- Start your response with the verdict: Supports / Partially supports / Contradicts
+- Then give the specific evidence found
+- Then note the most important caveat or limitation
+- Keep total response under 80 words"""
 
         msg = await anthropic_client_ref.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -610,24 +613,38 @@ Provide a 2-3 sentence assessment: what did you find, does it support or contrad
         )
 
         # Extract text and source from response
+        from urllib.parse import urlparse
         text_content = ""
         source_url = ""
         source_name = ""
 
         for block in msg.content:
-            if hasattr(block, "type"):
-                if block.type == "text":
-                    text_content = block.text.strip()
-                elif block.type == "tool_result":
-                    # Extract URL from search results
-                    if hasattr(block, "content"):
-                        for item in block.content:
-                            if hasattr(item, "url"):
-                                source_url = item.url
-                                # Extract domain as source name
-                                from urllib.parse import urlparse
-                                source_name = urlparse(source_url).netloc.replace("www.", "")
-                                break
+            if not hasattr(block, "type"):
+                continue
+            if block.type == "text":
+                raw = block.text.strip()
+                # Strip any leading markdown artifacts
+                raw = raw.lstrip(",-. ")
+                # Remove markdown bold/asterisks
+                import re
+                raw = re.sub(r"\*\*.*?\*\*:?\s*", "", raw)
+                raw = re.sub(r"\*", "", raw)
+                text_content = raw.strip()
+            elif block.type == "tool_use" and block.name == "web_search":
+                pass  # search invocation, not results
+            elif hasattr(block, "content") and isinstance(block.content, list):
+                # tool_result block — extract URLs
+                for item in block.content:
+                    if hasattr(item, "url") and item.url and not source_url:
+                        source_url = item.url
+                        source_name = urlparse(source_url).netloc.replace("www.", "")
+
+        # Also check for citations in text if no URL found yet
+        if not source_url and text_content:
+            urls = re.findall(r'https?://[^\s>\"\)]+', text_content)
+            if urls:
+                source_url = urls[0]
+                source_name = urlparse(source_url).netloc.replace("www.", "")
 
         if not text_content:
             return {"available": False, "error": "No search results"}
