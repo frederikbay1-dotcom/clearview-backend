@@ -400,8 +400,11 @@ async def route_query(validation_query: dict) -> dict:
 
     combined = (desc + " " + claim_text).lower()
 
-    # Override: energy domain or oil/crude keywords always go to commodity prices first
-    if domain == "energy" or any(k in combined for k in ("oil","crude","petroleum","urals","brent","wti","energy price","gas price","discount")):
+    # Override: energy domain or oil/crude keywords → commodity prices
+    # BUT skip if it's a European/EU claim — those go to Eurostat
+    is_european = any(k in combined for k in ("european","eu gas","eu import","eurozone","germany","german","france","french","italy","spain","norway","dutch","netherlands","lng import to europe","europe lng"))
+    is_energy = domain == "energy" or any(k in combined for k in ("oil","crude","petroleum","urals","brent","wti","energy price","gas price","discount"))
+    if is_energy and not is_european:
         logger.info(f"Energy override for claim {claim_id} -> worldbank_commodity")
         data = await query_commodity_price(_match_commodity(combined))
         return {"claim_id": claim_id, "claim_text": claim_text, "data": data}
@@ -616,8 +619,9 @@ RULES:
 - For claims about a country importing energy (e.g. India importing Russian oil): use suggested_source = "worldbank" with description = "energy imports percentage for [country]"
 - For claims about specific statistics (percentages, dollar amounts, growth rates): ALWAYS generate a validation_query even if the source is indirect
 - In suggested_parameters.description: be specific — name the exact country, commodity, or indicator needed.
-- For EU/European energy claims (gas dependency, electricity prices, manufacturing): use suggested_source = "eurostat"
-- For US LNG export claims or bilateral energy trade: use suggested_source = "eia"
+- For EU/European energy claims (Russian gas dependency, EU gas supply, electricity prices, German manufacturing, EU energy imports): ALWAYS use suggested_source = "eurostat"
+- For US LNG export claims or US bilateral energy trade: use suggested_source = "eia"
+- IMPORTANT: if the claim mentions EU, European, Germany, German, France, Norway, or any European country in an energy context, use "eurostat" not "fred" or "worldbank_commodity"
 - Never use suggested_source = "other" — always pick the closest available source.
 - Generate validation_queries for AT LEAST 3 claims per article if possible."""
 
