@@ -499,21 +499,23 @@ RULES:
 
 CLAIM: {vr['claim_text']}
 
+DATA SOURCE: {data.get("series_label") or data.get("indicator") or data.get("commodity") or "Economic indicator"}
 DATA:
 {_format_data(data)}
 
-Write 2-3 sharp, direct sentences. No headers, no markdown.
+Write 2-3 sharp, direct sentences. No markdown whatsoever — no asterisks, no bold, no bullet points, no headers.
 
-Lead with a verdict: does the data support, partially support, or contradict the claim?
+Start with a plain verdict word: Supports, Partially supports, or Contradicts.
 Then give the specific numbers that justify your verdict.
-Then note the single most important limitation or caveat.
+Then note the single most important caveat.
 
 Rules:
-- Be direct and specific — name exact figures, dates, percentages
-- If data is a price series, compare the trend across the full date range shown, not just recent days
-- If the claim mentions a specific number, compare it directly to the data
-- Never say the data "cannot validate" if it clearly supports or contradicts — commit to a verdict
-- Keep total length under 60 words"""}]
+- No asterisks or bold formatting of any kind
+- The series_label in the data tells you what the numbers represent — always use it. Never confuse a price ($/barrel) with a volume (barrels/day)
+- If the claim mentions a specific number, compare it directly to the data value
+- If data covers a price series, describe the price trend and what it implies for the claim
+- Commit to a verdict — never say only "cannot validate" if the data is clearly relevant
+- Keep total length under 65 words"""}]
             )
             summary_text = synth.content[0].text.strip()
             return {
