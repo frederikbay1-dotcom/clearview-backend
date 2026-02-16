@@ -408,6 +408,29 @@ async def route_query(validation_query: dict) -> dict:
 
     combined = (desc + " " + claim_text).lower()
 
+    # Hard override 1: European energy/economic claims → Eurostat regardless of LLM suggestion
+    eu_terms = ("european union","eu member","eu gas","eu supply","eu import","eu depend","eu energy",
+                "eu electricity","eu spent","eu subsid","eu natural gas","eu shrink","eu reduc",
+                "germany","german industrial","german manufactur","german electricity",
+                "norway gas","europe gas","europe energy","europe electric","europe manufactur",
+                "europe slash","europe cut","european commission","russia gas to europe",
+                "russian gas depend","lng to europe","europe lng")
+    if any(k in combined for k in eu_terms):
+        logger.info(f"EU override for claim {claim_id} -> eurostat")
+        combined_lower = combined
+        if any(k in combined_lower for k in ("electricity","power price","industrial price")):
+            ds = EUROSTAT_DATASETS["eu_electricity_price"]
+        elif any(k in combined_lower for k in ("manufactur","industrial output","factory","production index")):
+            ds = EUROSTAT_DATASETS["de_manufacturing"]
+        elif any(k in combined_lower for k in ("depend","import share","import percent","supply share")):
+            ds = EUROSTAT_DATASETS["eu_energy_dependency"]
+        elif any(k in combined_lower for k in ("russia","russian")):
+            ds = EUROSTAT_DATASETS["eu_gas_russia"]
+        else:
+            ds = EUROSTAT_DATASETS["eu_gas_supply"]
+        data = await query_eurostat(ds[0], ds[1], ds[2])
+        return {"claim_id": claim_id, "claim_text": claim_text, "data": data}
+
     # Override: energy domain or oil/crude keywords → commodity prices
     # BUT skip if it's a European/EU claim — those go to Eurostat
     is_european = any(k in combined for k in (
